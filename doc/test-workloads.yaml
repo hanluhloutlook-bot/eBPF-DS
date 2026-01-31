@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ebpf-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-server
+  namespace: ebpf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-server
+  template:
+    metadata:
+      labels:
+        app: echo-server
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ebpf-ds-test-worker
+      containers:
+        - name: server
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-text=hello"
+          ports:
+            - containerPort: 5678
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-server
+  namespace: ebpf-test
+spec:
+  selector:
+    app: echo-server
+  ports:
+    - port: 80
+      targetPort: 5678
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curl-client
+  namespace: ebpf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curl-client
+  template:
+    metadata:
+      labels:
+        app: curl-client
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ebpf-ds-test-worker2
+      containers:
+        - name: client
+          image: curlimages/curl:8.7.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - "sleep 3600"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curl-client-2
+  namespace: ebpf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curl-client-2
+  template:
+    metadata:
+      labels:
+        app: curl-client-2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ebpf-ds-test-worker
+      containers:
+        - name: client
+          image: curlimages/curl:8.7.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - "sleep 3600"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-server-2
+  namespace: ebpf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-server-2
+  template:
+    metadata:
+      labels:
+        app: echo-server-2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ebpf-ds-test-worker
+      containers:
+        - name: server
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-text=hello-2"
+          ports:
+            - containerPort: 5678
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-a
+  namespace: ebpf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-a
+  template:
+    metadata:
+      labels:
+        app: multi-a
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ebpf-ds-test-worker2
+      containers:
+        - name: multitool
+          image: wbitt/network-multitool:latest
+          ports:
+            - containerPort: 80

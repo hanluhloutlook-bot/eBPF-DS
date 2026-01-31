@@ -1,0 +1,20 @@
+{
+  "clusterName": "kubernetes",
+  "namespace": "default",
+  "name": "block-node1-telnet",
+  "targetObject": {
+    "type": "namespace/deployment",
+    "name": "nginx-test"
+  },
+  "createUser": "admin",
+  "egressList": [],
+  "ingressList": [
+    {
+      "protocol": "TCP",
+      "port": 23,
+      "remoteType": "ips",
+      "remoteNamespace": "",
+      "remoteName": "192.168.59.11"
+    }
+  ]
+}

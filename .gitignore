@@ -1,0 +1,6 @@
+doc/业务目标
+target/
+*.class
+*.jar
+*.jar.original
+doc/WORKLOG_LOCAL.md

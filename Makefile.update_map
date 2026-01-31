@@ -1,0 +1,12 @@
+CLANG ?= clang
+CC ?= gcc
+CFLAGS = -static -Wall -O2 -I/usr/include/bpf
+LDFLAGS = -lbpf -lelf -lz
+
+all: update_map
+
+update_map: update_map.c
+	$(CC) $(CFLAGS) -o update_map update_map.c $(LDFLAGS)
+
+clean:
+	rm -f update_map

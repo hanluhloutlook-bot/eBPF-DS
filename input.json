@@ -1,0 +1,42 @@
+{
+  "clusterName": "hqnt-cceeiet-qcloud-a-hgx86",
+  "namespace": "hb-qcloud1",
+  "name": "允许下游访问",
+  "targetObject": {
+    "type": "namespace/deployment",
+    "name": "hb01"
+  },
+  "createUser": "zhangyiyfwh",
+  "egressList": [
+    {
+      "protocol": "TCP",
+      "port": 18092,
+      "remoteType": "deployment",
+      "remoteNamespace": "hb-qcloud1",
+      "remoteName": "deployment_name"
+    },
+    {
+      "protocol": "UDP",
+      "port": 18093,
+      "remoteType": "namespace",
+      "remoteNamespace": "hb-qcloud1",
+      "remoteName": "hb-qcloud1"
+    },
+    {
+      "protocol": "UDP",
+      "port": 18094,
+      "remoteType": "ips",
+      "remoteNamespace": "",
+      "remoteName": "192.168.1.0/24"
+    }
+  ],
+  "ingressList": [
+    {
+      "protocol": "UDP",
+      "port": 18095,
+      "remoteType": "namespace/deployment/ips",
+      "remoteNamespace": "hb-qcloud1",
+      "remoteName": "hb01"
+    }
+  ]
+}
