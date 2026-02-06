@@ -1,10 +1,9 @@
-cat > deploy.sh << 'EOF'
 #!/bin/bash
 set -e
 
 # 配置信息
 IMAGE_NAME="k8s-ebpf"
-IMAGE_TAG="1.0.0"
+IMAGE_TAG="1.1.8"
 # 以下根据你的环境修改：
 # - 本地使用：REGISTRY="localhost" 或 "k8s-ebpf"
 # - 私有仓库：REGISTRY="192.168.x.x:5000"
@@ -16,7 +15,7 @@ echo "🚀 开始部署 k8s-ebpf DaemonSet..."
 
 # 1. 更新DaemonSet配置中的镜像地址
 echo "📝 更新镜像地址..."
-sed -i.bak "s|k8s-ebpf/k8s-ebpf:1.0.0|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g" daemonset.yaml
+sed -E -i.bak "s|k8s-ebpf/k8s-ebpf:[0-9.]+|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g" daemonset.yaml
 
 echo "✅ 镜像地址更新为: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
@@ -100,6 +99,3 @@ echo "4. 更新镜像: 修改IMAGE_TAG后重新运行 ./build.sh 和 ./deploy.sh
 
 # 恢复备份文件
 mv daemonset.yaml.bak daemonset.yaml 2>/dev/null || true
-EOF
-
-chmod +x deploy.sh

@@ -39,6 +39,23 @@ struct {
     __uint(value_size, sizeof(__u8));
 } policy_mode SEC(".maps");
 
+// CIDR 规则（src/dst）
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 65536);
+    __uint(key_size, sizeof(struct cidr_key));
+    __uint(value_size, sizeof(struct flow_value));
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} cidr_src_policy SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 65536);
+    __uint(key_size, sizeof(struct cidr_key));
+    __uint(value_size, sizeof(struct flow_value));
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} cidr_dst_policy SEC(".maps");
+
 // 白名单方向位
 #define MODE_INGRESS 1
 #define MODE_EGRESS  2
@@ -88,11 +105,21 @@ int tc_ingress(struct __sk_buff *skb) {
     struct flow_value *val = NULL;
     if (inner_map) {
         val = bpf_map_lookup_elem(inner_map, &key);
+        if (!val && key.port != 0) {
+            struct flow_key any_key = key;
+            any_key.port = 0;
+            val = bpf_map_lookup_elem(inner_map, &any_key);
+        }
     }
 
     // 6. 若 endpoint 级规则未命中，则回退共享规则
     if (!val) {
         val = bpf_map_lookup_elem(&net_policy, &key);
+        if (!val && key.port != 0) {
+            struct flow_key any_key = key;
+            any_key.port = 0;
+            val = bpf_map_lookup_elem(&net_policy, &any_key);
+        }
     }
     if (val) {
         // 命中规则，原子更新计数器
@@ -105,6 +132,38 @@ int tc_ingress(struct __sk_buff *skb) {
         }
 
         // 命中 allow 规则，直接放行
+        return 0; // TC_ACT_OK
+    }
+
+    // 6.5 CIDR 规则匹配（src/dst）
+    struct cidr_key ckey = {};
+    ckey.prefixlen = 112; // 32(src/dst) + 32(other) + 16(port) + 8(proto) + 24(pad)
+    ckey.ip = ip->saddr;
+    ckey.other_ip = ip->daddr;
+    ckey.port = key.port;
+    ckey.proto = key.proto;
+    val = bpf_map_lookup_elem(&cidr_src_policy, &ckey);
+    if (!val) {
+        ckey.ip = ip->daddr;
+        ckey.other_ip = ip->saddr;
+        val = bpf_map_lookup_elem(&cidr_dst_policy, &ckey);
+    }
+    if (!val && key.port != 0) {
+        ckey.ip = ip->saddr;
+        ckey.other_ip = ip->daddr;
+        ckey.port = 0;
+        val = bpf_map_lookup_elem(&cidr_src_policy, &ckey);
+        if (!val) {
+            ckey.ip = ip->daddr;
+            ckey.other_ip = ip->saddr;
+            val = bpf_map_lookup_elem(&cidr_dst_policy, &ckey);
+        }
+    }
+    if (val) {
+        __sync_fetch_and_add(&val->counter, 1);
+        if (val->action == 1) {
+            return 2; // TC_ACT_SHOT
+        }
         return 0; // TC_ACT_OK
     }
 

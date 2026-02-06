@@ -19,4 +19,15 @@ struct flow_value {
     __u64 counter;  // 命中统计
 };
 
+// CIDR 规则 Key（用于 LPM_TRIE）
+// prefixlen 仅作用于 ip 字段，其他字段按完整匹配处理（通过更长前缀实现）。
+struct cidr_key {
+    __u32 prefixlen; // 前缀长度（bit）
+    __u32 ip;        // 被前缀匹配的 IP（网络字节序）
+    __u32 other_ip;  // 另一端 IP（网络字节序）
+    __u16 port;      // 目的端口（网络字节序）
+    __u8  proto;     // 协议
+    __u8  pad[3];    // 对齐
+};
+
 #endif

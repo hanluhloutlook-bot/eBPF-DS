@@ -4,3 +4,17 @@ target/
 *.jar
 *.jar.original
 doc/WORKLOG_LOCAL.md
+
+# Local build artifacts
+tc_filter.bpf.o
+update_map
+
+# Exported images and split archives
+*.tar
+*.zip
+*.z[0-9][0-9]
+
+# Off-cloud package output
+offcloud-package/
+offcloud-package.zip
+offcloud-package.z[0-9][0-9]

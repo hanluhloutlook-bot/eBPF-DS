@@ -1,6 +1,6 @@
-ARG JRE_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/dragonwell/dragonwell:8
-ARG BUILD_BASE_IMAGE=kindest/node:v1.28.6
-ARG RUNTIME_BASE_IMAGE=kindest/node:v1.28.6
+ARG JRE_BASE_IMAGE=eclipse-temurin:8-jre
+ARG BUILD_BASE_IMAGE=debian:bookworm-slim
+ARG RUNTIME_BASE_IMAGE=debian:bookworm-slim
 
 FROM ${JRE_BASE_IMAGE} AS jre
 
@@ -20,17 +20,24 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY update_map.c tc_filter.bpf.c vmlinux.h policy.h /src/
-RUN cc -O2 -g update_map.c -o update_map -lbpf -lelf -lz
+RUN cc -O2 -static -s update_map.c -o update_map -lbpf -lelf -lz
 RUN clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu -c tc_filter.bpf.c -o tc_filter.bpf.o
 
 FROM ${RUNTIME_BASE_IMAGE}
 
 USER root
 
-# 从 Dragonwell 基础镜像拷贝 JRE 到运行镜像（运行镜像已内置 tc/curl 等工具）
-COPY --from=jre /opt/alibaba/dragonwell8 /opt/dragonwell8
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 install -y --no-install-recommends --fix-missing \
+        ca-certificates \
+        curl \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/opt/dragonwell8
+# 从 Temurin 基础镜像拷贝 JRE 到运行镜像
+COPY --from=jre /opt/java/openjdk /opt/java/openjdk
+
+ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app

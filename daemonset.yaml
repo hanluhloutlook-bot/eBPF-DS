@@ -48,7 +48,7 @@
 
             containers:
             - name: ebpf-app
-              image: k8s-ebpf/k8s-ebpf:1.0.0
+              image: k8s-ebpf/k8s-ebpf:1.1.8
               imagePullPolicy: IfNotPresent
 
               env:

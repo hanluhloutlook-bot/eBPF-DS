@@ -33,6 +33,31 @@ static const char *PIN_NET_POLICY = "/sys/fs/bpf/tc_filter_net_policy";
 static const char *PIN_POLICY_MODE = "/sys/fs/bpf/tc_filter_policy_mode";
 // endpoint 级规则外层 map 固定路径（key=ifindex）
 static const char *PIN_ENDPOINT_RULES = "/sys/fs/bpf/tc_filter_endpoint_rules";
+// CIDR 规则 map 固定路径
+static const char *PIN_CIDR_SRC_POLICY = "/sys/fs/bpf/tc_filter_cidr_src_policy";
+static const char *PIN_CIDR_DST_POLICY = "/sys/fs/bpf/tc_filter_cidr_dst_policy";
+
+#define CIDR_KEY_BITS 112
+#define CIDR_REST_BITS 80
+
+static int pin_map_replace(int fd, const char *path, const char *label) {
+    if (bpf_obj_pin(fd, path) == 0) {
+        printf("%s pinned to %s\n", label, path);
+        return 0;
+    }
+    if (errno == EEXIST) {
+        if (unlink(path) != 0) {
+            fprintf(stderr, "Failed to remove existing %s pin at %s: %s\n", label, path, strerror(errno));
+            return -1;
+        }
+        if (bpf_obj_pin(fd, path) == 0) {
+            printf("%s re-pinned to %s\n", label, path);
+            return 0;
+        }
+    }
+    fprintf(stderr, "Failed to pin %s: %s\n", label, strerror(errno));
+    return -1;
+}
 
 /*
  * 判断网卡接口是否存在，避免对不存在接口挂载 tc。
@@ -96,6 +121,50 @@ void bump_memlock() {
     if (setrlimit(RLIMIT_MEMLOCK, &rlim) != 0) {
         fprintf(stderr, "警告: 无法提升 RLIMIT_MEMLOCK 限制\n");
     } 
+}
+
+static int is_cidr(const char *ip_str) {
+    return ip_str && strchr(ip_str, '/') != NULL;
+}
+
+static int parse_cidr(const char *cidr_str, __u32 *ip, __u32 *prefix) {
+    if (!cidr_str || !ip || !prefix) {
+        return -1;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s", cidr_str);
+    char *slash = strchr(buf, '/');
+    if (!slash) {
+        return -1;
+    }
+    *slash = '\0';
+    int plen = atoi(slash + 1);
+    if (plen < 0 || plen > 32) {
+        return -1;
+    }
+    __u32 ip_net = 0;
+    if (inet_pton(AF_INET, buf, &ip_net) != 1) {
+        return -1;
+    }
+    __u32 ip_host = ntohl(ip_net);
+    __u32 mask = (plen == 0) ? 0 : (0xFFFFFFFFu << (32 - plen));
+    ip_host &= mask;
+    *ip = htonl(ip_host);
+    *prefix = (__u32)plen;
+    return 0;
+}
+
+static void build_cidr_key(struct cidr_key *key, __u32 ip, __u32 other_ip, __u32 prefix_len, __u16 port, __u8 proto) {
+    memset(key, 0, sizeof(*key));
+    if (prefix_len < 32) {
+        key->prefixlen = prefix_len;
+    } else {
+        key->prefixlen = 32 + CIDR_REST_BITS;
+    }
+    key->ip = ip;
+    key->other_ip = other_ip;
+    key->port = htons(port);
+    key->proto = proto;
 }
 
 // // 与eBPF程序中的结构体定义一致
@@ -194,11 +263,7 @@ void startEBPF(const char *interface_name) {
         char map_pin_path[256];
         snprintf(map_pin_path, sizeof(map_pin_path), "%s", PIN_NET_POLICY);
         
-        if (bpf_obj_pin(map_fd, map_pin_path) == 0) {
-            printf("Map pinned to %s\n", map_pin_path);
-        } else {
-            fprintf(stderr, "Failed to pin map: %s\n", strerror(errno));
-        }
+        pin_map_replace(map_fd, map_pin_path, "Map");
     }
 
     // 固定 policy_mode map
@@ -208,11 +273,7 @@ void startEBPF(const char *interface_name) {
     } else {
         char mode_pin_path[256];
         snprintf(mode_pin_path, sizeof(mode_pin_path), "%s", PIN_POLICY_MODE);
-        if (bpf_obj_pin(mode_fd, mode_pin_path) == 0) {
-            printf("Policy mode map pinned to %s\n", mode_pin_path);
-        } else {
-            fprintf(stderr, "Failed to pin policy mode map: %s\n", strerror(errno));
-        }
+        pin_map_replace(mode_fd, mode_pin_path, "Policy mode map");
     }
 
     // 固定 endpoint_rules 外层 map
@@ -222,11 +283,22 @@ void startEBPF(const char *interface_name) {
     } else {
         char endpoint_pin_path[256];
         snprintf(endpoint_pin_path, sizeof(endpoint_pin_path), "%s", PIN_ENDPOINT_RULES);
-        if (bpf_obj_pin(endpoint_fd, endpoint_pin_path) == 0) {
-            printf("Endpoint rules map pinned to %s\n", endpoint_pin_path);
-        } else {
-            fprintf(stderr, "Failed to pin endpoint rules map: %s\n", strerror(errno));
-        }
+        pin_map_replace(endpoint_fd, endpoint_pin_path, "Endpoint rules map");
+    }
+
+    // 固定 CIDR src/dst map
+    int cidr_src_fd = bpf_object__find_map_fd_by_name(obj, "cidr_src_policy");
+    if (cidr_src_fd < 0) {
+        fprintf(stderr, "Failed to find map 'cidr_src_policy'\n");
+    } else {
+        pin_map_replace(cidr_src_fd, PIN_CIDR_SRC_POLICY, "CIDR src map");
+    }
+
+    int cidr_dst_fd = bpf_object__find_map_fd_by_name(obj, "cidr_dst_policy");
+    if (cidr_dst_fd < 0) {
+        fprintf(stderr, "Failed to find map 'cidr_dst_policy'\n");
+    } else {
+        pin_map_replace(cidr_dst_fd, PIN_CIDR_DST_POLICY, "CIDR dst map");
     }
 
     // 6. 挂载BPF程序到tc（主接口 + 常见桥接口 + 默认所有 veth）
@@ -235,6 +307,7 @@ void startEBPF(const char *interface_name) {
     attach_tc_to_iface("flannel.1", pin_path);
     attach_tc_to_iface("docker0", pin_path);
     attach_tc_to_iface("cbr0", pin_path);
+    attach_tc_to_iface("tunl0", pin_path);
     attach_tc_to_all_veth(pin_path);
 
     bpf_object__close(obj);
@@ -244,7 +317,126 @@ void startEBPF(const char *interface_name) {
 /*
  * 添加或更新一条规则到 eBPF map。
  */
+static void addCidrRule(char *src_str, char *dst_str, int port, int proto, char *action_str) {
+    int src_cidr = is_cidr(src_str);
+    int dst_cidr = is_cidr(dst_str);
+    if (src_cidr && dst_cidr) {
+        fprintf(stderr, "CIDR rules do not support both src and dst as CIDR in one rule.\n");
+        return;
+    }
+
+    struct cidr_key key = {0};
+    struct flow_value val = {0};
+    __u32 ip = 0;
+    __u32 prefix = 0;
+    __u32 other_ip = 0;
+
+    if (src_cidr) {
+        if (parse_cidr(src_str, &ip, &prefix) != 0) {
+            fprintf(stderr, "Invalid src CIDR: %s\n", src_str);
+            return;
+        }
+        if (inet_pton(AF_INET, dst_str, &other_ip) != 1) {
+            fprintf(stderr, "Invalid dst IP: %s\n", dst_str);
+            return;
+        }
+        build_cidr_key(&key, ip, other_ip, prefix, port, (__u8)proto);
+    } else if (dst_cidr) {
+        if (parse_cidr(dst_str, &ip, &prefix) != 0) {
+            fprintf(stderr, "Invalid dst CIDR: %s\n", dst_str);
+            return;
+        }
+        if (inet_pton(AF_INET, src_str, &other_ip) != 1) {
+            fprintf(stderr, "Invalid src IP: %s\n", src_str);
+            return;
+        }
+        build_cidr_key(&key, ip, other_ip, prefix, port, (__u8)proto);
+    }
+
+    if (strcmp(action_str, "drop") == 0) {
+        val.action = 1;
+    } else {
+        val.action = 0;
+    }
+
+    const char *map_path = src_cidr ? PIN_CIDR_SRC_POLICY : PIN_CIDR_DST_POLICY;
+    int map_fd = bpf_obj_get(map_path);
+    if (map_fd < 0) {
+        fprintf(stderr, "Failed to get pinned CIDR map. Please run './update_map start <interface>' first.\n");
+        return;
+    }
+
+    int err = bpf_map_update_elem(map_fd, &key, &val, BPF_ANY);
+    if (err) {
+        fprintf(stderr, "Failed to update CIDR rule: %s (error code: %d)\n", strerror(errno), err);
+        close(map_fd);
+        return;
+    }
+
+    printf("CIDR rule updated: Src=%s Dst=%s Port=%d Proto=%d Action=%s\n",
+           src_str, dst_str, port, proto, action_str);
+    close(map_fd);
+}
+
+static void deleteCidrRule(char *src_str, char *dst_str, int port, int proto) {
+    int src_cidr = is_cidr(src_str);
+    int dst_cidr = is_cidr(dst_str);
+    if (src_cidr && dst_cidr) {
+        fprintf(stderr, "CIDR rules do not support both src and dst as CIDR in one rule.\n");
+        return;
+    }
+
+    struct cidr_key key = {0};
+    __u32 ip = 0;
+    __u32 prefix = 0;
+    __u32 other_ip = 0;
+
+    if (src_cidr) {
+        if (parse_cidr(src_str, &ip, &prefix) != 0) {
+            fprintf(stderr, "Invalid src CIDR: %s\n", src_str);
+            return;
+        }
+        if (inet_pton(AF_INET, dst_str, &other_ip) != 1) {
+            fprintf(stderr, "Invalid dst IP: %s\n", dst_str);
+            return;
+        }
+        build_cidr_key(&key, ip, other_ip, prefix, port, (__u8)proto);
+    } else if (dst_cidr) {
+        if (parse_cidr(dst_str, &ip, &prefix) != 0) {
+            fprintf(stderr, "Invalid dst CIDR: %s\n", dst_str);
+            return;
+        }
+        if (inet_pton(AF_INET, src_str, &other_ip) != 1) {
+            fprintf(stderr, "Invalid src IP: %s\n", src_str);
+            return;
+        }
+        build_cidr_key(&key, ip, other_ip, prefix, port, (__u8)proto);
+    }
+
+    const char *map_path = src_cidr ? PIN_CIDR_SRC_POLICY : PIN_CIDR_DST_POLICY;
+    int map_fd = bpf_obj_get(map_path);
+    if (map_fd < 0) {
+        fprintf(stderr, "Failed to get pinned CIDR map. Please run './update_map start <interface>' first.\n");
+        return;
+    }
+
+    int err = bpf_map_delete_elem(map_fd, &key);
+    if (err) {
+        fprintf(stderr, "Failed to delete CIDR rule: %s (error code: %d)\n", strerror(errno), err);
+        close(map_fd);
+        return;
+    }
+
+    printf("CIDR rule deleted: Src=%s Dst=%s Port=%d Proto=%d\n",
+           src_str, dst_str, port, proto);
+    close(map_fd);
+}
+
 void addRule(char *src_str, char *dst_str, int port, int proto, char *action_str) {
+    if (is_cidr(src_str) || is_cidr(dst_str)) {
+        addCidrRule(src_str, dst_str, port, proto, action_str);
+        return;
+    }
     struct flow_key key = {0};
     struct flow_value val = {0};
 
@@ -436,6 +628,78 @@ void addRule(char *src_str, char *dst_str, int port, int proto, char *action_str
     }
 }
 
+static int append_entry(char **result, size_t *result_len, int *count, const char *entry) {
+    size_t entry_len = strlen(entry);
+    size_t new_len = *result_len + entry_len + (*count > 0 ? 1 : 0) + 1;
+    char *new_result = realloc(*result, new_len);
+    if (!new_result) {
+        return -1;
+    }
+    *result = new_result;
+    if (*count > 0) {
+        strcat(*result, "\n");
+    }
+    strcat(*result, entry);
+    *result_len = new_len - 1;
+    (*count)++;
+    return 0;
+}
+
+static void queryCidrMap(const char *map_path, int is_src, char **result, size_t *result_len, int *count) {
+    int map_fd = bpf_obj_get(map_path);
+    if (map_fd < 0) {
+        return;
+    }
+
+    struct cidr_key key = {0};
+    struct cidr_key next_key = {0};
+    struct flow_value val = {0};
+    bool first_key = true;
+    while (bpf_map_get_next_key(map_fd, first_key ? NULL : &key, &next_key) == 0) {
+        if (bpf_map_lookup_elem(map_fd, &next_key, &val) == 0) {
+            char ip_str[INET_ADDRSTRLEN];
+            char other_ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &next_key.ip, ip_str, sizeof(ip_str));
+            inet_ntop(AF_INET, &next_key.other_ip, other_ip_str, sizeof(other_ip_str));
+
+            int cidr_prefix = 0;
+            if (next_key.prefixlen <= 32) {
+                cidr_prefix = (int)next_key.prefixlen;
+            } else {
+                cidr_prefix = (int)next_key.prefixlen - CIDR_REST_BITS;
+            }
+            if (cidr_prefix < 0) {
+                cidr_prefix = 0;
+            }
+            if (cidr_prefix > 32) {
+                cidr_prefix = 32;
+            }
+
+            const char *action_desc = (val.action == 1) ? "drop" : "accept";
+            char entry[256];
+            snprintf(entry, sizeof(entry), "%s %s/%d %s %d %d %s %llu",
+                     is_src ? "cidr-src" : "cidr-dst",
+                     ip_str,
+                     cidr_prefix,
+                     other_ip_str,
+                     ntohs(next_key.port),
+                     next_key.proto,
+                     action_desc,
+                     (unsigned long long)val.counter);
+
+            if (append_entry(result, result_len, count, entry) != 0) {
+                close(map_fd);
+                return;
+            }
+        }
+
+        first_key = false;
+        memcpy(&key, &next_key, sizeof(key));
+    }
+
+    close(map_fd);
+}
+
 /*
  * 查询并返回当前 eBPF map 中的所有规则。
  */
@@ -488,24 +752,11 @@ char* queryRules() {
                      action_desc,
                      (unsigned long long)val.counter);
 
-            size_t entry_len = strlen(entry);
-            size_t new_len = result_len + entry_len + (count > 0 ? 1 : 0) + 1; // +1 for newline (except first) +1 for null terminator
-
-            char *new_result = realloc(result, new_len);
-            if (!new_result) {
+            if (append_entry(&result, &result_len, &count, entry) != 0) {
                 free(result);
                 close(map_fd);
                 return NULL;
             }
-            result = new_result;
-
-            if (count > 0) {
-                strcat(result, "\n");
-            }
-            strcat(result, entry);
-
-            result_len = new_len - 1;
-            count++;
         }
 
         first_key = false;
@@ -515,6 +766,10 @@ char* queryRules() {
     }
 
     close(map_fd);
+
+    // 追加 CIDR 规则
+    queryCidrMap(PIN_CIDR_SRC_POLICY, 1, &result, &result_len, &count);
+    queryCidrMap(PIN_CIDR_DST_POLICY, 0, &result, &result_len, &count);
 
     if (count == 0) {
         free(result);
@@ -528,6 +783,10 @@ char* queryRules() {
  * 从 eBPF map 中删除一条规则。
  */
 void deleteRule(char *src_str, char *dst_str, int port, int proto) {
+    if (is_cidr(src_str) || is_cidr(dst_str)) {
+        deleteCidrRule(src_str, dst_str, port, proto);
+        return;
+    }
     struct flow_key key = {0};
 
     if (inet_pton(AF_INET, src_str, &key.src_ip) != 1) {
@@ -840,7 +1099,7 @@ static void delEndpointRule(const char *iface, char *src_str, char *dst_str, int
  */
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s start <interface_name> | %s add <src_ip> <dst_ip> <port> <proto> <action> | %s delete <src_ip> <dst_ip> <port> <proto> | %s query | %s mode set <ip> <ingress|egress|both|mask> | %s mode del <ip> | %s endpoint add <iface> | %s endpoint del <iface> | %s endpoint add-rule <iface> <src_ip> <dst_ip> <port> <proto> <action> | %s endpoint del-rule <iface> <src_ip> <dst_ip> <port> <proto>\n",
+        fprintf(stderr, "Usage: %s start <interface_name> | %s add <src_ip|src_cidr> <dst_ip|dst_cidr> <port> <proto> <action> | %s delete <src_ip|src_cidr> <dst_ip|dst_cidr> <port> <proto> | %s query | %s mode set <ip> <ingress|egress|both|mask> | %s mode del <ip> | %s endpoint add <iface> | %s endpoint del <iface> | %s endpoint add-rule <iface> <src_ip> <dst_ip> <port> <proto> <action> | %s endpoint del-rule <iface> <src_ip> <dst_ip> <port> <proto>\n",
                 argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 1;
     }
@@ -932,5 +1191,5 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    return 1;
+    return 0;
 }
