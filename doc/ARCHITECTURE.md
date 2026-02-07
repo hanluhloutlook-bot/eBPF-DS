@@ -29,7 +29,9 @@
 ### 3.4 eBPF 程序
 - **`tc_filter.bpf.c`**：
   - map：`endpoint_rules`（Hash-of-Maps，按 ifindex 绑定）、`net_policy`（共享规则）、`policy_mode`（白名单管控方向）。
+  - map：`conntrack_map`（LRU 连接跟踪，用于回包放行）、`conntrack_ttl`（连接跟踪 TTL 配置）。
   - hook：`SEC("tc")` 对 ingress/egress 进行过滤，命中规则执行 allow/drop；未命中且处于白名单管控则默认拒绝。
+  - **stateful 回包放行**：命中 allow 时写入反向流到 `conntrack_map`，回包命中 conntrack 直接放行。
 
 ### 3.5 eBPF 管理程序
 - **`update_map.c`**：
@@ -55,7 +57,9 @@
 ### 4.3 数据平面匹配流程
 1. tc hook 进入 eBPF `tc_ingress`。
 2. 从 IP 头构造 key（src/dst/port/proto）。
+2.1 先查 `conntrack_map`：命中且未过期则直接放行回包。
 3. 查 `net_policy`：命中则计数并执行 drop/allow。
+3.1 当命中 allow 时写入 `conntrack_map` 的反向流记录（用于后续回包放行）。
 
 ## 5. 目录与文件说明（核心）
 - Java：`src/main/java/com/example/*`
@@ -73,3 +77,5 @@
 - 对内核 4.19 做兼容处理（去 BTF、严格模式）。
 - 控制器支持简化模式（无法连 K8s API 时使用占位 IP）。
 - 同节点通信通过 veth 挂载进行覆盖。
+- **连接跟踪 TTL 可配置**：通过环境变量 `CT_TIMEOUT_SECONDS` 设置（默认 60s），由 `update_map start` 初始化写入 `conntrack_ttl`。
+- **回包放行语义**：allow 规则会自动放行回包（stateful），避免白名单下回包被默认拒绝。

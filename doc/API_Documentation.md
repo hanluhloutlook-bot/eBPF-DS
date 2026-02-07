@@ -2,7 +2,7 @@
 
 ## 概述
 
-本文档描述了网络策略管理系统的 REST API 接口，用于创建网络策略、添加规则、启动和停止 eBPF 程序。
+本文档描述了网络策略管理系统的 REST API 接口，用于创建/删除网络策略与查询规则。
 
 ## API 基础路径
 
@@ -58,6 +58,25 @@
 - **可选**: `clusterName`、`createUser`、`egressList`、`ingressList`、`policyMode`、`ingressMode`、`egressMode`
 - **说明**: 当 `ingressMode`/`egressMode` 未设置时，使用 `policyMode`；`policyMode` 未设置时默认 `blacklist`。
 
+#### 字段可接受值
+- `targetObject.type`: `deployment`、`namespace`、`ips`
+- `targetObject.name`:
+  - `deployment`: deployment 名称（命名空间来自请求 `namespace`）
+  - `namespace`: 目标命名空间（为空则使用请求 `namespace`）
+  - `ips`: IP/CIDR 列表（英文逗号分隔）
+- `policyMode`/`ingressMode`/`egressMode`: `whitelist`、`blacklist`
+- `egressList[*].protocol` / `ingressList[*].protocol`: `TCP`、`UDP`、`ICMP` 或数字协议号
+- `egressList[*].port` / `ingressList[*].port`: 0-65535（`0` 表示所有端口）
+- `egressList[*].remoteType` / `ingressList[*].remoteType`: `deployment`、`namespace`、`ips`、`namespace/deployment/ips`
+- `egressList[*].remoteNamespace` / `ingressList[*].remoteNamespace`:
+  - 当 `remoteType` 为 `deployment`/`namespace`/`namespace/deployment/ips` 必填
+  - 当 `remoteType=ips` 可为空
+- `egressList[*].remoteName` / `ingressList[*].remoteName`:
+  - `deployment`: deployment 名称
+  - `namespace`: 命名空间名称
+  - `ips`: IP/CIDR 列表（英文逗号分隔）
+  - `namespace/deployment/ips`: deployment 名称
+
 #### 响应信息
 - **成功响应**: `Network policy created successfully`
 - **错误响应**: `Error creating network policy: [错误信息]`
@@ -69,31 +88,7 @@ curl -X POST http://localhost:8080/api/networkpolicy/create \
   -d @input.json
 ```
 
-### 2. 添加单个规则
-
-#### 请求信息
-- **路径**: `/api/networkpolicy/add-rule`
-- **方法**: `POST`
-- **内容类型**: `application/json`
-- **请求体**:
-  - `src`: 源 IP 地址（必填）
-  - `dst`: 目标 IP 地址（必填）
-  - `port`: 端口号（必填，`0` 表示所有端口）
-  - `proto`: 协议编号（必填，6=TCP, 17=UDP, 1=ICMP）
-  - `action`: 动作（必填，`allow` 或 `drop`）
-
-#### 响应信息
-- **成功响应**: `Rule added successfully`
-- **错误响应**: `Error adding rule: [错误信息]`
-
-#### 示例请求
-```bash
-curl -X POST http://localhost:8080/api/networkpolicy/add-rule \
-  -H "Content-Type: application/json" \
-  -d '{"src":"192.168.59.11","dst":"192.168.59.10","port":23,"proto":6,"action":"drop"}'
-```
-
-### 3. 启动 eBPF 程序
+### 2. 启动 eBPF 程序
 
 #### 请求信息
 - **路径**: `/api/networkpolicy/start-ebpf`
@@ -116,7 +111,7 @@ curl -X POST http://localhost:8080/api/networkpolicy/start-ebpf \
 #### 实现说明
 此接口通过调用 `./update_map start <interfaceName>` 命令来启动eBPF程序，该命令会根据update_map.c中startEBPF()函数的具体实现来加载过滤器到指定的网络接口。
 
-### 4. 停止 eBPF 程序
+### 3. 停止 eBPF 程序
 
 #### 请求信息
 - **路径**: `/api/networkpolicy/stop-ebpf`
@@ -136,7 +131,7 @@ curl -X POST http://localhost:8080/api/networkpolicy/stop-ebpf \
   -d '{"interfaceName":"ens33"}'
 ```
 
-### 5. 删除网络策略
+### 4. 删除网络策略
 
 #### 请求信息
 - **路径**: `/api/networkpolicy/delete`
@@ -158,27 +153,79 @@ curl -X POST http://localhost:8080/api/networkpolicy/delete \
   -d '{"clusterName":"demo","namespace":"default","name":"policy-1"}'
 ```
 
-### 6. 删除单个规则
+### 5. 查询规则
 
 #### 请求信息
-- **路径**: `/api/networkpolicy/delete-rule`
-- **方法**: `POST`
-- **内容类型**: `application/json`
-- **请求体**:
-  - `src`: 源 IP 地址（必填）
-  - `dst`: 目标 IP 地址（必填）
-  - `port`: 端口号（必填，`0` 表示所有端口）
-  - `proto`: 协议编号（必填，6=TCP, 17=UDP, 1=ICMP）
+- **路径**: `/api/networkpolicy/query`
+- **方法**: `GET`
 
 #### 响应信息
-- **成功响应**: `Rule deleted successfully`
-- **错误响应**: `Error deleting rule: [错误信息]`
+- **成功响应**: 规则列表文本
+- **错误响应**: `Error querying eBPF map: [错误信息]`
+
+#### 示例响应
+```
+10.244.119.74 10.244.200.137 5678 6 allow 12
+10.244.119.75 10.244.200.137 5678 6 drop 3
+```
+
+### 6. 查询策略与规则明细（调试）
+
+#### 请求信息
+- **路径**: `/api/networkpolicy/policies`
+- **方法**: `GET`
+
+#### 响应信息
+- **成功响应**: 策略列表 JSON（包含策略名称与 ingress/egress 规则明细）
+- **错误响应**: `Error querying policy cache: [错误信息]`
 
 #### 示例请求
 ```bash
-curl -X POST http://localhost:8080/api/networkpolicy/delete-rule \
-  -H "Content-Type: application/json" \
-  -d '{"src":"192.168.59.11","dst":"192.168.59.10","port":23,"proto":6}'
+curl -X GET http://localhost:8080/api/networkpolicy/policies
+```
+
+#### 示例响应
+```json
+[
+  {
+    "clusterName": "demo",
+    "namespace": "ebpf-test",
+    "name": "policy-a-egress-whitelist",
+    "targetObject": {
+      "type": "ips",
+      "name": "10.244.119.74"
+    },
+    "createUser": "tester",
+    "policyMode": "whitelist",
+    "ingressMode": null,
+    "egressMode": null,
+    "ingressList": [],
+    "egressList": [
+      {
+        "protocol": "TCP",
+        "port": 5678,
+        "remoteType": "ips",
+        "remoteNamespace": "",
+        "remoteName": "10.244.200.137"
+      }
+    ]
+  }
+]
+```
+
+### 7. 查询策略缓存摘要（调试）
+
+#### 请求信息
+- **路径**: `/api/networkpolicy/cache`
+- **方法**: `GET`
+
+#### 响应信息
+- **成功响应**: 缓存摘要字符串（包含策略数量与 key 列表）
+- **错误响应**: `Error querying policy cache: [错误信息]`
+
+#### 示例请求
+```bash
+curl -X GET http://localhost:8080/api/networkpolicy/cache
 ```
 
 ## 数据结构
@@ -200,8 +247,8 @@ curl -X POST http://localhost:8080/api/networkpolicy/delete-rule \
 ### TargetObject
 | 字段名 | 类型 | 描述 |
 |--------|------|------|
-| type | String | 目标对象类型（必填）：`namespace/deployment`、`namespace`、`ips` |
-| name | String | 目标对象名称（必填）：`namespace/deployment` 为 deployment 名；`namespace` 为目标命名空间（为空则使用请求中的 `namespace`）；`ips` 为 IP/CIDR 列表 |
+| type | String | 目标对象类型（必填）：`deployment`、`namespace`、`ips` |
+| name | String | 目标对象名称（必填）：`deployment` 为 deployment 名（命名空间来自请求 `namespace`）；`namespace` 为目标命名空间（为空则使用请求中的 `namespace`）；`ips` 为 IP/CIDR 列表 |
 
 ### Rule (基类)
 | 字段名 | 类型 | 描述 |
@@ -217,6 +264,8 @@ curl -X POST http://localhost:8080/api/networkpolicy/delete-rule \
 > 说明：当 `remoteType` 为 `deployment`、`namespace` 或 `namespace/deployment/ips` 时，会解析实际 Pod IP，并在存在 Service 的情况下自动包含对应 Service ClusterIP 与端口映射（仅匹配目标端口）。
 
 > 说明：CIDR 前缀 **小于 32** 时，仅按 IP 前缀匹配（不区分端口/对端 IP）；前缀 **等于 32** 时按完整四元组匹配。
+
+> 说明：ICMP 无端口概念，使用 `port=0` 表示全量匹配。
 
 ## 云下部署（虚拟机）
 
@@ -250,9 +299,11 @@ WantedBy=multi-user.target
 
 2. **Kubernetes 依赖**: 当连接到 Kubernetes API 服务器时，会尝试获取实际的 Pod IP 地址；如果无法连接，则会使用占位符 IP 地址。
 
-3. **eBPF 程序**: 启动 eBPF 程序时，需要确保 `tc_block_filter.bpf.o` 和 `tc_egress_filter.bpf.o` 文件存在于应用的工作目录中。
+3. **eBPF 程序**: 启动 eBPF 程序时，需要确保 `tc_filter.bpf.o` 文件存在于应用的工作目录中。
 
-4. **update_map 工具**: 启动和添加规则时，都需要确保 `update_map` 工具存在于应用的工作目录中，因为这两个操作都依赖此工具。
+4. **update_map 工具**: 启动与规则查询依赖 `update_map` 工具，请确保其存在于应用工作目录中。
+
+5. **回包放行（stateful）**: 命中 allow 规则时会记录连接状态，回包在 TTL 内可直接放行。TTL 通过 `CT_TIMEOUT_SECONDS` 配置，默认 60s。
 
 ## 错误处理
 
@@ -269,21 +320,14 @@ WantedBy=multi-user.target
      -d '{"interfaceName":"ens33"}'
    ```
 
-2. **添加规则**:
-   ```bash
-   curl -X POST http://localhost:8080/api/networkpolicy/add-rule \
-     -H "Content-Type: application/json" \
-     -d '{"src":"192.168.59.10","dst":"192.168.59.11","port":8081,"proto":6,"action":"drop"}'
-   ```
-
-3. **创建网络策略**:
+2. **创建网络策略**:
    ```bash
    curl -X POST http://localhost:8080/api/networkpolicy/create \
      -H "Content-Type: application/json" \
      -d @input.json
    ```
 
-4. **停止 eBPF 程序**:
+3. **停止 eBPF 程序**:
    ```bash
    curl -X POST http://localhost:8080/api/networkpolicy/stop-ebpf \
      -H "Content-Type: application/json" \

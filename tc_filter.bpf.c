@@ -56,9 +56,28 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } cidr_dst_policy SEC(".maps");
 
+// 连接跟踪（用于回包放行）
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __uint(key_size, sizeof(struct ct_key));
+    __uint(value_size, sizeof(__u64)); // 时间戳（ns）
+} conntrack_map SEC(".maps");
+
+// 连接跟踪 TTL 配置（默认 60s）
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct ct_ttl_value));
+} conntrack_ttl SEC(".maps");
+
 // 白名单方向位
 #define MODE_INGRESS 1
 #define MODE_EGRESS  2
+
+// 连接跟踪超时默认值（ns）
+#define CT_TIMEOUT_DEFAULT_NS (60ULL * 1000000000ULL)
 
 /*
  * tc 入口程序：解析报文并根据 map 规则执行放行/丢弃。
@@ -84,6 +103,8 @@ int tc_ingress(struct __sk_buff *skb) {
     key.dst_ip = ip->daddr;
     key.port   = 0;
     key.proto  = ip->protocol;
+    __u16 sport = 0;
+    __u16 dport = 0;
 
     // 如果是 TCP/UDP，提取端口
     if (ip->protocol == 6 || ip->protocol == 17) {
@@ -93,9 +114,35 @@ int tc_ingress(struct __sk_buff *skb) {
         
         // 检查源端口和目的端口（共 4 字节）是否都在范围内
         if (data + l4_offset + 4 <= data_end) {
-            // 直接计算目的端口的地址（源端口占 2 字节，目的端口在偏移 2 字节处）
-            __u16 *dport = (__u16 *)(data + l4_offset + 2);
-            key.port = *dport; 
+            // 直接读取源/目的端口
+            __u16 *ports = (__u16 *)(data + l4_offset);
+            sport = ports[0];
+            dport = ports[1];
+            key.port = dport;
+        }
+    }
+
+    // 4.5 连接跟踪回包放行（优先级高于策略）
+    if (ip->protocol == 6 || ip->protocol == 17 || ip->protocol == 1) {
+        struct ct_key cur = {};
+        cur.src_ip = ip->saddr;
+        cur.dst_ip = ip->daddr;
+        cur.src_port = sport;
+        cur.dst_port = dport;
+        cur.proto = ip->protocol;
+        __u64 *last_seen = bpf_map_lookup_elem(&conntrack_map, &cur);
+        if (last_seen) {
+            __u64 now = bpf_ktime_get_ns();
+            __u64 ttl_ns = CT_TIMEOUT_DEFAULT_NS;
+            __u32 ttl_key = 0;
+            struct ct_ttl_value *ttl_val = bpf_map_lookup_elem(&conntrack_ttl, &ttl_key);
+            if (ttl_val && ttl_val->timeout_ns > 0) {
+                ttl_ns = ttl_val->timeout_ns;
+            }
+            if (now - *last_seen <= ttl_ns) {
+                *last_seen = now;
+                return 0; // 回包放行
+            }
         }
     }
 
@@ -131,6 +178,18 @@ int tc_ingress(struct __sk_buff *skb) {
             return 2; // TC_ACT_SHOT
         }
 
+        // 命中 allow 规则，写入连接跟踪（回包放行）
+        if (ip->protocol == 6 || ip->protocol == 17 || ip->protocol == 1) {
+            struct ct_key rev = {};
+            rev.src_ip = ip->daddr;
+            rev.dst_ip = ip->saddr;
+            rev.src_port = dport;
+            rev.dst_port = sport;
+            rev.proto = ip->protocol;
+            __u64 now = bpf_ktime_get_ns();
+            bpf_map_update_elem(&conntrack_map, &rev, &now, BPF_ANY);
+        }
+
         // 命中 allow 规则，直接放行
         return 0; // TC_ACT_OK
     }
@@ -163,6 +222,16 @@ int tc_ingress(struct __sk_buff *skb) {
         __sync_fetch_and_add(&val->counter, 1);
         if (val->action == 1) {
             return 2; // TC_ACT_SHOT
+        }
+        if (ip->protocol == 6 || ip->protocol == 17 || ip->protocol == 1) {
+            struct ct_key rev = {};
+            rev.src_ip = ip->daddr;
+            rev.dst_ip = ip->saddr;
+            rev.src_port = dport;
+            rev.dst_port = sport;
+            rev.proto = ip->protocol;
+            __u64 now = bpf_ktime_get_ns();
+            bpf_map_update_elem(&conntrack_map, &rev, &now, BPF_ANY);
         }
         return 0; // TC_ACT_OK
     }

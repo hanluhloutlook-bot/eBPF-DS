@@ -3,7 +3,7 @@ set -e
 
 # 配置信息
 IMAGE_NAME="k8s-ebpf"
-IMAGE_TAG="1.1.8"
+IMAGE_TAG="1.1.10"
 # 以下根据你的环境修改：
 # - 本地使用：REGISTRY="localhost" 或 "k8s-ebpf"
 # - 私有仓库：REGISTRY="192.168.x.x:5000"

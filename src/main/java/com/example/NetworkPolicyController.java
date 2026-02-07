@@ -68,20 +68,6 @@ public class NetworkPolicyController {
         }
     }
 
-    private static class RuleRequest {
-        public String src;
-        public String dst;
-        public Integer port;
-        public Integer proto;
-        public String action;
-    }
-
-    private static class RuleDeleteRequest {
-        public String src;
-        public String dst;
-        public Integer port;
-        public Integer proto;
-    }
 
     private static class InterfaceRequest {
         public String interfaceName;
@@ -297,7 +283,7 @@ public class NetworkPolicyController {
                     System.err.println("Failed to get target namespace pods: " + e.getMessage());
                     continue;
                 }
-            } else if ("namespace/deployment".equals(targetObject.getType())) {
+            } else if ("deployment".equals(targetObject.getType())) {
                 try {
                     targetPodIPs.addAll(getPodIPsByDeployment(client, request.getNamespace(), targetObject.getName()));
                     targetServiceIPs.addAll(getServiceClusterIPsByDeployment(client, request.getNamespace(), targetObject.getName()));
@@ -373,7 +359,7 @@ public class NetworkPolicyController {
                     Map<String, Set<Integer>> targetServicePorts = new HashMap<>();
                     if (client != null && targetObject != null) {
                         try {
-                            if ("namespace/deployment".equals(targetObject.getType())) {
+                            if ("deployment".equals(targetObject.getType())) {
                                 targetServicePorts = getServicePortsByDeployment(client, request.getNamespace(), targetObject.getName(), ingressRule.getPort());
                             } else if ("namespace".equals(targetObject.getType())) {
                                 targetServicePorts = getServicePortsByNamespace(client, targetNamespace, ingressRule.getPort());
@@ -445,48 +431,6 @@ public class NetworkPolicyController {
         return ok;
     }
 
-    @PostMapping("/add-rule")
-    /**
-     * 通过 body 新增一条 eBPF 规则。
-     *
-     * @param request 规则请求（src/dst/port/proto/action）
-     * @return 处理结果
-     */
-    public String addRule(@RequestBody RuleRequest request) {
-        try {
-            if (request == null || request.src == null || request.dst == null || request.port == null
-                || request.proto == null || request.action == null) {
-                return "Error adding rule: src/dst/port/proto/action are required";
-            }
-            String cmd = sudoPrefix + "./update_map add " + request.src + " " + request.dst + " " + request.port + " " + request.proto + " " + request.action;
-            executeCommand(cmd);
-            return "Rule added successfully";
-        } catch (Exception e) {
-            e.printStackTrace();
-            return "Error adding rule: " + e.getMessage();
-        }
-    }
-
-    @PostMapping("/delete-rule")
-    /**
-     * 通过 body 删除一条 eBPF 规则。
-     *
-     * @param request 规则请求（src/dst/port/proto）
-     * @return 处理结果
-     */
-    public String deleteRule(@RequestBody RuleDeleteRequest request) {
-        try {
-            if (request == null || request.src == null || request.dst == null || request.port == null || request.proto == null) {
-                return "Error deleting rule: src/dst/port/proto are required";
-            }
-            String cmd = sudoPrefix + "./update_map delete " + request.src + " " + request.dst + " " + request.port + " " + request.proto;
-            executeCommand(cmd);
-            return "Rule deleted successfully";
-        } catch (Exception e) {
-            e.printStackTrace();
-            return "Error deleting rule: " + e.getMessage();
-        }
-    }
 
     @PostMapping("/start-ebpf")
     /**
@@ -556,6 +500,36 @@ public class NetworkPolicyController {
      */
     public String queryPolicyCache() {
         return policyCacheSummary();
+    }
+
+    @GetMapping("/policies")
+    /**
+     * 查询当前策略与规则明细（仅用于调试）。
+     *
+     * @return 策略列表（JSON）
+     */
+    public String queryPolicies() {
+        try {
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (NetworkPolicyRequest request : POLICY_CACHE) {
+                Map<String, Object> item = new HashMap<>();
+                item.put("clusterName", request.getClusterName());
+                item.put("namespace", request.getNamespace());
+                item.put("name", request.getName());
+                item.put("targetObject", request.getTargetObject());
+                item.put("createUser", request.getCreateUser());
+                item.put("policyMode", request.getPolicyMode());
+                item.put("ingressMode", request.getIngressMode());
+                item.put("egressMode", request.getEgressMode());
+                item.put("ingressList", request.getIngressList());
+                item.put("egressList", request.getEgressList());
+                result.add(item);
+            }
+            return JSON.toJSONString(result);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Error querying policy cache: " + e.getMessage();
+        }
     }
 
     private void cachePolicy(NetworkPolicyRequest request) {

@@ -18,6 +18,14 @@
   - **key**：Pod IP（网络字节序）。
   - **value**：方向掩码（1=ingress, 2=egress）。
   - **用途**：白名单“未命中默认拒绝”。
+- `conntrack_map`（LRU Hash）：
+  - **key**：五元组（src_ip, dst_ip, src_port, dst_port, proto）。
+  - **value**：最近命中时间戳（ns）。
+  - **用途**：回包放行（stateful）。
+- `conntrack_ttl`（Array）：
+  - **key**：固定 0。
+  - **value**：TTL 超时时间（ns）。
+  - **用途**：控制回包放行窗口（默认 60s）。
 
 ### 2.2 Java 侧缓存
 - `POLICY_CACHE`：缓存全量策略请求。
@@ -45,9 +53,11 @@
 1. 进入 tc 程序 `tc_ingress`。
 2. **优先**按 `ifindex` 查询 `endpoint_rules` inner map。
 3. 若未命中，回退查询 `net_policy`。
+3.1 若命中 allow 规则，写入 `conntrack_map` 以放行回包。
 4. 若仍未命中：
    - 若 `policy_mode` 标记了该方向白名单 -> **默认拒绝**。
    - 否则默认放行。
+4.1 回包命中 `conntrack_map` 且未过期时直接放行。
 
 ## 4. 规则生效的关键点
 - **endpoint 级规则优先**，保证 Pod 粒度隔离。
@@ -67,3 +77,4 @@
   - 白名单下，只有明确允许的流量能通过。
   - Pod 漂移后规则自动迁移。
   - 共享规则保证短暂空窗期可控。
+  - 命中 allow 的回包在 TTL 内自动放行（stateful）。

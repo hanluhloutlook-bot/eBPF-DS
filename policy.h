@@ -3,6 +3,7 @@
 
 // 这里的类型定义要与 vmlinux.h 或标准头文件兼容
 typedef unsigned char __u8;
+typedef unsigned short __u16;
 typedef unsigned int __u32;
 typedef unsigned long long __u64;
 
@@ -17,6 +18,20 @@ struct flow_key {
 struct flow_value {
     __u32 action;   // 0 = ALLOW (TC_ACT_OK), 1 = DROP (TC_ACT_SHOT)
     __u64 counter;  // 命中统计
+};
+
+// 连接跟踪 Key（用于回包放行）
+struct ct_key {
+    __u32 src_ip;   // 源 IP (网络字节序)
+    __u32 dst_ip;   // 目的 IP (网络字节序)
+    __u16 src_port; // 源端口 (网络字节序)
+    __u16 dst_port; // 目的端口 (网络字节序)
+    __u8  proto;    // 协议
+    __u8  pad[3];   // 对齐
+};
+
+struct ct_ttl_value {
+    __u64 timeout_ns; // 连接跟踪超时时间（ns）
 };
 
 // CIDR 规则 Key（用于 LPM_TRIE）

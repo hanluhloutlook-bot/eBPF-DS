@@ -295,6 +295,7 @@ void startEBPF(const char *interface_name) {
     }
 
     int cidr_dst_fd = bpf_object__find_map_fd_by_name(obj, "cidr_dst_policy");
+    int ct_ttl_fd = bpf_object__find_map_fd_by_name(obj, "conntrack_ttl");
     if (cidr_dst_fd < 0) {
         fprintf(stderr, "Failed to find map 'cidr_dst_policy'\n");
     } else {
@@ -302,6 +303,31 @@ void startEBPF(const char *interface_name) {
     }
 
     // 6. 挂载BPF程序到tc（主接口 + 常见桥接口 + 默认所有 veth）
+
+    if (ct_ttl_fd >= 0) {
+        unlink("/sys/fs/bpf/tc_filter_conntrack_ttl");
+        if (bpf_obj_pin(ct_ttl_fd, "/sys/fs/bpf/tc_filter_conntrack_ttl") == 0) {
+            printf("Conntrack TTL map pinned to /sys/fs/bpf/tc_filter_conntrack_ttl\n");
+        }
+    }
+
+    // 初始化/更新连接跟踪 TTL（单位：秒，默认 60）
+    if (ct_ttl_fd >= 0) {
+        const char *ttl_env = getenv("CT_TIMEOUT_SECONDS");
+        unsigned long ttl_seconds = 60;
+        if (ttl_env && ttl_env[0] != '\0') {
+            char *end = NULL;
+            unsigned long parsed = strtoul(ttl_env, &end, 10);
+            if (end && *end == '\0' && parsed > 0) {
+                ttl_seconds = parsed;
+            }
+        }
+        struct ct_ttl_value ttl_val;
+        ttl_val.timeout_ns = (unsigned long long)ttl_seconds * 1000000000ULL;
+        __u32 ttl_key = 0;
+        bpf_map_update_elem(ct_ttl_fd, &ttl_key, &ttl_val, BPF_ANY);
+        printf("Conntrack TTL set: %lus\n", ttl_seconds);
+    }
     attach_tc_to_iface(interface_name, pin_path);
     attach_tc_to_iface("cni0", pin_path);
     attach_tc_to_iface("flannel.1", pin_path);

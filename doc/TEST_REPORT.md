@@ -3,9 +3,15 @@
 日期：2026-02-01
 
 ## 1. 测试目标
-- 清理旧的测试环境与 iptables 相关测试影响。
-- 重建 kind 集群，尽量贴近生产版本（K8s v1.28.x）。
-- 验证基础集群与功能性测试（跨节点通信、Pod 漂移）。
+- 云上可以针对命名空间和负载进行策略配置。
+- 可以针对目标配置出向或入向白名单策略。且技术上不应有冲突。
+- 验证基础集群与功能性测试（跨节点通信、Pod 漂移、策略下发等）。
+
+## 1.1 业务场景描述（补充）
+- 管理端对接本程序，用户可选择**目标负载或命名空间**，配置**入向/出向**规则。
+- 远端类型支持：**负载、命名空间、CIDR**。
+- 端口可指定或全量（`0` 表示所有端口）。
+- 若配置白名单/黑名单访问关系，**除 Pod 间流量外，对应 Service 也必须默认受策略约束**。
 
 ## 2. 环境说明
 - 本地环境：macOS（Docker Desktop）
@@ -198,6 +204,120 @@
 
 ## 4. 修复项验证
 - 修复 CIDR 前缀匹配逻辑：/24 已生效。
+
+---
+
+# 回归测试记录（v1.1.10 补充：targetType=deployment/namespace）
+
+日期：2026-02-06
+
+## 1. 版本与环境
+- 镜像版本：k8s-ebpf/k8s-ebpf:1.1.10
+- 集群：kind (ebpf-ds-test)，K8s v1.28.6，Calico v3.27.4
+- 节点：1 控制面 + 2 工作节点
+- 命名空间：ebpf-test
+
+## 2. 测试对象（本次实际 IP）
+- A（multi-a）：10.244.119.65（worker2）
+- B（echo-server）：10.244.200.129（worker）
+- C（echo-server-2）：10.244.200.130（worker）
+- curl-client：10.244.119.66（worker2）
+- curl-client-2：10.244.200.131（worker）
+- Service（echo-server ClusterIP）：10.96.57.162:80
+
+> 说明：策略缓存为本节点内存态，创建策略时使用**对应节点**的 DaemonSet Pod 以保证策略下发到本节点。
+
+## 3. 场景设计与结果
+
+### 3.1 targetType=deployment（白名单：生产常见）
+场景：A 出向白名单仅允许访问 B；B 入向白名单仅允许 A 访问；分别验证 Pod 直连与 Service 访问。
+
+结果：
+- A -> B（Pod IP 直连 10.244.200.129:5678）：成功（hello）。
+- A -> B（Service 10.96.57.162:80）：成功（hello）。
+- A -> C（10.244.200.130:5678）：失败（超时）。
+- 非允许源 -> B（Pod/Service）：失败（超时）。
+
+### 3.2 targetType=namespace（黑名单：生产常见）
+场景：对 ebpf-test 命名空间应用策略，验证针对特定目标的黑名单拦截与放行效果（Pod/Service）。
+
+结果：
+- **出向黑名单**（namespace 目标，拦截 C）：
+	- curl-client -> B（Pod 直连）：成功（hello）。
+	- curl-client -> C（Pod 直连）：失败（超时）。
+- **入向黑名单**（namespace 目标，拦截 curl-client-2）：
+	- curl-client -> B（Pod/Service）：成功（hello）。
+	- curl-client-2 -> B（Pod/Service）：失败（超时）。
+
+### 3.3 targetType=namespace（白名单：生产常见，结果异常）
+场景：对 ebpf-test 命名空间应用入向/出向白名单，按设计应仅允许指定来源/目标（Pod/Service）。
+
+结果：
+- **入向白名单**（namespace 目标，仅允许 curl-client）：
+	- curl-client -> B（Pod/Service）：**成功（hello）**。
+	- curl-client-2 -> B（Pod/Service）：失败（超时）。
+- **出向白名单**（namespace 目标，仅允许访问 echo-server）：
+	- curl-client -> B（Pod/Service）：**成功（hello）**。
+	- curl-client -> C（Pod 直连）：失败（超时）。
+
+结论：namespace 白名单场景**已恢复按预期放行**（通过 API 下发，未手工修改 map）。
+
+定位结论（原因解释）：
+- namespace ingress 白名单会把**命名空间内所有 Pod**都标记为 ingress 白名单目标（policy_mode）。
+- 原先为**无状态过滤**，请求包命中 allow 规则但回包被默认拒绝，表现为超时。
+- 已引入 **stateful 回包放行（conntrack + TTL）**，回包可命中并放行。
+
+### 3.4 CIDR 场景（API 下发，覆盖入向/出向/双向/正向/反向）
+场景：以 A（multi-a）为受控目标，使用 CIDR（10.244.200.0/24）进行规则验证；B/C 均在该 CIDR 内。
+
+结果：
+- **出向黑名单（CIDR）**：
+	- A -> B/C（Pod 直连）：失败（超时）。
+- **出向白名单（CIDR）**：
+	- A -> B/C（Pod 直连）：成功（hello/hello-2）。
+	- A -> B Service（10.96.57.162:80，非 CIDR）：失败（超时）。
+	- **反向语义**：curl-client-2 -> A:80 **成功**（未被阻断）。
+- **入向黑名单（CIDR）**：
+	- curl-client（10.244.119.0/24）-> B（Pod/Service）：失败（超时）。
+	- curl-client-2 -> B（Pod/Service）：成功（hello）。
+- **入向白名单（CIDR）**：
+	- curl-client -> B（Pod/Service）：成功（hello）。
+	- curl-client-2 -> B（Pod/Service）：失败（超时）。
+- **双向白名单（CIDR，ICMP）**：
+	- A -> B/C：ping 成功。
+	- 10.244.200.0/24 -> A：未完成验证（curl-client-2 容器 ping 需要 root 权限）。
+
+### 3.5 规则重复检查
+通过 `update_map query | sort | uniq -d` 检查 net_policy，未发现重复规则。
+说明：策略解析会对 Pod IP / Service IP / 端口映射进行展开，出现“多条相似规则”属于预期；map key 唯一，不会存储真正重复项。
+
+### 3.6 targetType=deployment + remoteType=namespace（补测）
+场景：目标为具体负载（deployment），远端为命名空间，验证入向/出向黑名单，以及 Service 访问。
+
+结果：
+- **出向黑名单**（目标 curl-client，远端 namespace）：
+	- curl-client -> B/C（Pod 直连）：失败（超时）。
+	- curl-client -> B Service（10.96.57.162:80）：失败（超时）。
+- **入向黑名单**（目标 echo-server，远端 namespace）：
+	- curl-client / curl-client-2 -> B（Pod 直连）：失败（超时）。
+	- curl-client -> B Service（10.96.57.162:80）：失败（超时）。
+
+### 3.7 targetType=deployment + remoteType=deployment（端口 0 补测）
+场景：目标为 curl-client，远端为 echo-server，端口设置为 0（全端口），验证 Pod/Service。
+
+结果：
+- curl-client -> B（Pod 直连）：失败（超时）。
+- curl-client -> B Service（10.96.57.162:80）：失败（超时）。
+
+### 3.8 仍未覆盖的场景
+- **UDP 规则**：现有测试负载未提供 UDP 服务，未覆盖。
+- **remoteType=namespace/deployment/ips**：控制器未显式实现该类型解析，未覆盖。
+
+## 4. 结论
+- targetType=deployment 的出向/入向白名单在 Pod 直连与 Service 访问下均生效。
+- targetType=namespace 的出向/入向黑名单在 Pod 直连与 Service 访问下均生效。
+- targetType=deployment + remoteType=namespace 黑名单策略在 Pod/Service 下均生效。
+- targetType=deployment + remoteType=deployment 且端口 0 场景在 Pod/Service 下生效。
 
 ---
 
